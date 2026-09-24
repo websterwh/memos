@@ -36,6 +36,65 @@
   var COLORS = ["#111827", "#dc2626", "#2563eb", "#16a34a", "#f59e0b", "#a855f7"];
   var SIZES = [1, 2, 4, 8, 14];
 
+  var ICON_FONT_HREF =
+    "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=block";
+
+  var ICONS = {
+    prev: "chevron_left",
+    next: "chevron_right",
+    zoomOut: "zoom_out",
+    zoomIn: "zoom_in",
+    fitWidth: "swap_horiz",
+    fitPage: "fit_screen",
+    search: "search",
+    searchClose: "close",
+    fullscreen: "fullscreen",
+    download: "download",
+    close: "close",
+    undo: "undo",
+    redo: "redo",
+    select: "arrow_selector_tool",
+    pan: "pan_tool",
+    pen: "draw",
+    highlight: "ink_highlighter",
+    eraserPrecision: "ink_eraser",
+    eraserStroke: "backspace",
+    palette: "palette",
+  };
+
+  function ensureIconFont() {
+    if (document.getElementById("mpa-icon-font")) return;
+    document.head.appendChild(
+      el("link", {
+        id: "mpa-icon-font",
+        rel: "stylesheet",
+        href: ICON_FONT_HREF,
+      }),
+    );
+  }
+
+  function icon(name) {
+    return el("span", { class: "material-symbols-outlined mpa-icon", "aria-hidden": "true", text: name });
+  }
+
+  function iconButton(iconName, label, onclick, extraClass) {
+    var btn = el("button", {
+      class: "mpa-btn mpa-icon-btn" + (extraClass ? " " + extraClass : ""),
+      type: "button",
+      title: label,
+      "aria-label": label,
+      onclick: onclick,
+    });
+    btn.appendChild(icon(iconName));
+    return btn;
+  }
+
+  function toolButton(tool, iconName, label, onclick) {
+    var btn = iconButton(iconName, label, onclick, "mpa-tool-btn");
+    btn.dataset.tool = tool;
+    return btn;
+  }
+
   // ---------------------------------------------------------------------
   // Small DOM helpers. No innerHTML is used anywhere in this file so that
   // attachment filenames, search text and annotation text can never be
@@ -217,8 +276,10 @@
     if (!entry) return;
     if (entry.op === "add") {
       this.remove(entry.annotation.id, { record: false });
-    } else {
+    } else if (entry.op === "remove") {
       this.add(entry.annotation, { record: false });
+    } else if (entry.op === "erase") {
+      this._applyEraseWithoutRecording(entry.added, entry.removed);
     }
     this.redoStack.push(entry);
   };
@@ -228,10 +289,44 @@
     if (!entry) return;
     if (entry.op === "add") {
       this.add(entry.annotation, { record: false });
-    } else {
+    } else if (entry.op === "remove") {
       this.remove(entry.annotation.id, { record: false });
+    } else if (entry.op === "erase") {
+      this._applyEraseWithoutRecording(entry.removed, entry.added);
     }
     this.undoStack.push(entry);
+  };
+
+  // Compound operation used by the precision eraser: one drag can remove
+  // whole annotations and add back the surviving fragments split out of
+  // them. This is recorded as a single undo/redo step, not one per point.
+  AnnotationManager.prototype.applyErase = function (removed, added) {
+    if (!removed.length && !added.length) return;
+    this._applyEraseWithoutRecording(removed, added);
+    this.undoStack.push({ op: "erase", removed: removed, added: added });
+    this.redoStack = [];
+  };
+
+  AnnotationManager.prototype._applyEraseWithoutRecording = function (toRemove, toAdd) {
+    var removedIds = {};
+    toRemove.forEach(function (a) {
+      removedIds[a.id] = true;
+    });
+    this.annotations = this.annotations.filter(function (a) {
+      return !removedIds[a.id];
+    });
+    var self = this;
+    toAdd.forEach(function (a) {
+      self.annotations.push(a);
+    });
+    var pages = {};
+    toRemove.concat(toAdd).forEach(function (a) {
+      pages[a.page] = true;
+    });
+    Object.keys(pages).forEach(function (p) {
+      self._notify(Number(p));
+    });
+    this._scheduleSave();
   };
 
   AnnotationManager.prototype._notify = function (page) {
@@ -431,6 +526,38 @@
     return parts.join(" ");
   }
 
+  function pointNearPolyline(points, center, radius) {
+    for (var i = 0; i < points.length; i++) {
+      var dx = points[i][0] - center[0];
+      var dy = points[i][1] - center[1];
+      if (dx * dx + dy * dy <= radius * radius) return true;
+    }
+    return false;
+  }
+
+  // Splits a stroke's points into the runs that fall outside the eraser
+  // circle, dropping any point inside it. A circle in the middle of a
+  // stroke produces two surviving runs either side of the gap.
+  function splitPointsOutsideRadius(points, center, radius) {
+    var r2 = radius * radius;
+    var runs = [];
+    var current = [];
+    for (var i = 0; i < points.length; i++) {
+      var dx = points[i][0] - center[0];
+      var dy = points[i][1] - center[1];
+      if (dx * dx + dy * dy <= r2) {
+        if (current.length) {
+          runs.push(current);
+          current = [];
+        }
+      } else {
+        current.push(points[i]);
+      }
+    }
+    if (current.length) runs.push(current);
+    return runs;
+  }
+
   PDFPageView.prototype._clientToPagePoint = function (clientX, clientY) {
     var rect = this.svg.getBoundingClientRect();
     var vb = this.svg.viewBox.baseVal;
@@ -466,11 +593,17 @@
           style: self.drawing.style,
         });
         self.svg.appendChild(self.previewNode);
-      } else if (tool === "eraser") {
+      } else if (tool === "eraser-stroke") {
         e.preventDefault();
         self.svg.setPointerCapture(e.pointerId);
         self._erasing = e.pointerId;
         self._eraseAt(e.clientX, e.clientY);
+      } else if (tool === "eraser-precision") {
+        e.preventDefault();
+        self.svg.setPointerCapture(e.pointerId);
+        self._erasing = e.pointerId;
+        self._beginPrecisionErase();
+        self._precisionEraseAt(e.clientX, e.clientY);
       }
     });
 
@@ -484,7 +617,8 @@
         self.drawing.points.push(point);
         self.previewNode.setAttribute("d", pointsToPath(self.drawing.points));
       } else if (self._erasing === e.pointerId) {
-        self._eraseAt(e.clientX, e.clientY);
+        if (self._eraseSession) self._precisionEraseAt(e.clientX, e.clientY);
+        else self._eraseAt(e.clientX, e.clientY);
       }
     });
 
@@ -507,6 +641,7 @@
         }
       }
       if (self._erasing === e.pointerId) {
+        if (self._eraseSession) self._finishPrecisionErase();
         self._erasing = null;
       }
     }
@@ -522,6 +657,112 @@
     }
   };
 
+  // Precision (area) eraser: unlike the stroke eraser, this removes only
+  // the part of a stroke under the cursor, splitting it into whatever
+  // fragments survive on either side. The whole drag is one undo step,
+  // built by tracking a live "session" of touched annotations and only
+  // committing to AnnotationManager on pointerup.
+  PDFPageView.prototype._eraserRadius = function () {
+    return Math.max(this.viewer.size * 2.5, 8);
+  };
+
+  PDFPageView.prototype._beginPrecisionErase = function () {
+    this._eraseSession = { entries: new Map() };
+  };
+
+  PDFPageView.prototype._precisionEraseAt = function (clientX, clientY) {
+    var self = this;
+    var radius = this._eraserRadius();
+    var point = this._clientToPagePoint(clientX, clientY);
+    var session = this._eraseSession;
+
+    this.viewer.manager.getForPage(this.pageNumber).forEach(function (ann) {
+      if (session.entries.has(ann.id)) return;
+      if (ann.type !== "ink" && ann.type !== "highlight") return;
+      if (!pointNearPolyline(ann.data.points, point, radius)) return;
+      session.entries.set(ann.id, {
+        original: ann,
+        style: ann.style,
+        type: ann.type,
+        current: [ann.data.points.slice()],
+      });
+    });
+
+    var touchedAny = false;
+    session.entries.forEach(function (entry) {
+      var fragments = [];
+      entry.current.forEach(function (points) {
+        var runs = splitPointsOutsideRadius(points, point, radius);
+        if (runs.length !== 1 || runs[0].length !== points.length) touchedAny = true;
+        runs.forEach(function (run) {
+          if (run.length >= 2) fragments.push(run);
+        });
+      });
+      entry.current = fragments;
+    });
+
+    if (touchedAny) this._renderErasePreview();
+  };
+
+  PDFPageView.prototype._renderErasePreview = function () {
+    var self = this;
+    Array.prototype.slice.call(this.svg.querySelectorAll("[data-erase-preview]")).forEach(function (n) {
+      self.svg.removeChild(n);
+    });
+    this._eraseSession.entries.forEach(function (entry, id) {
+      var orig = self.svg.querySelector('[data-annotation-id="' + id + '"]');
+      if (orig) orig.style.display = "none";
+      entry.current.forEach(function (points, idx) {
+        var node = self._buildStrokeNode({
+          id: id + "__erase" + idx,
+          type: entry.type,
+          style: entry.style,
+          data: { points: points },
+        });
+        node.setAttribute("data-erase-preview", "1");
+        self.svg.appendChild(node);
+      });
+    });
+  };
+
+  PDFPageView.prototype._finishPrecisionErase = function () {
+    var self = this;
+    var session = this._eraseSession;
+    this._eraseSession = null;
+    if (!session || session.entries.size === 0) return;
+
+    var removed = [];
+    var added = [];
+    session.entries.forEach(function (entry) {
+      removed.push(entry.original);
+      entry.current.forEach(function (points) {
+        added.push({
+          id: uid(),
+          page: self.pageNumber,
+          type: entry.type,
+          style: entry.style,
+          data: { points: points },
+        });
+      });
+    });
+    Array.prototype.slice.call(this.svg.querySelectorAll("[data-erase-preview]")).forEach(function (n) {
+      self.svg.removeChild(n);
+    });
+    this.viewer.manager.applyErase(removed, added);
+  };
+
+  PDFPageView.prototype._discardPrecisionErase = function () {
+    var self = this;
+    if (!this._eraseSession) return;
+    Array.prototype.slice.call(this.svg.querySelectorAll("[data-erase-preview]")).forEach(function (n) {
+      self.svg.removeChild(n);
+    });
+    Array.prototype.slice.call(this.svg.querySelectorAll("[data-annotation-id]")).forEach(function (n) {
+      n.style.display = "";
+    });
+    this._eraseSession = null;
+  };
+
   PDFPageView.prototype.cancelDrawing = function () {
     if (this.drawing) {
       if (this.previewNode) {
@@ -530,6 +771,7 @@
       }
       this.drawing = null;
     }
+    this._discardPrecisionErase();
     this._erasing = null;
   };
 
@@ -781,7 +1023,7 @@
         this._setTool("pen");
         break;
       case "e":
-        this._setTool("eraser");
+        this._setTool(e.shiftKey ? "eraser-stroke" : "eraser-precision");
         break;
       default:
         break;
@@ -949,6 +1191,7 @@
 
   PDFAnnotationViewer.prototype._buildChrome = function () {
     var self = this;
+    ensureIconFont();
 
     this.statusEl = el("div", { class: "mpa-status" });
 
@@ -956,14 +1199,15 @@
       class: "mpa-page-input",
       type: "text",
       inputmode: "numeric",
+      "aria-label": "Page number",
       onchange: function () {
         var n = parseInt(self.pageInput.value, 10);
         if (!isNaN(n)) self.goToPage(n);
       },
     });
     this.pageCountLabel = el("span", { class: "mpa-page-count" });
-
     this.zoomLabel = el("span", { class: "mpa-zoom-label", text: "100%" });
+
     this.searchInput = el("input", {
       class: "mpa-search-input",
       type: "search",
@@ -973,6 +1217,8 @@
           if (e.shiftKey) self._searchStep(-1);
           else if (self.searchResults.length) self._searchStep(1);
           else self.search(self.searchInput.value);
+        } else if (e.key === "Escape") {
+          self._toggleSearchBar(false);
         }
       },
       oninput: function () {
@@ -980,128 +1226,108 @@
       },
     });
     this.searchStatus = el("span", { class: "mpa-search-status" });
-
     this.saveLabel = el("span", { class: "mpa-save-indicator", text: "Saved" });
 
-    var header = el("div", { class: "mpa-header" }, [
+    this.searchBar = el("div", { class: "mpa-searchbar" }, [
+      this.searchInput,
+      this.searchStatus,
+      iconButton(ICONS.searchClose, "Close search", function () {
+        self._toggleSearchBar(false);
+      }),
+    ]);
+
+    var topbar = el("div", { class: "mpa-topbar" }, [
       el("span", { class: "mpa-filename", text: this.filename }),
-      el("div", { class: "mpa-header-group" }, [
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Previous page",
-          text: "‹",
-          onclick: function () {
-            self.goToPage((self.currentPage || 1) - 1);
-          },
+      this.saveLabel,
+      iconButton(ICONS.search, "Search", function () {
+        self._toggleSearchBar();
+      }),
+      iconButton(ICONS.fullscreen, "Fullscreen", function () {
+        self._toggleFullscreen();
+      }),
+      iconButton(ICONS.download, "Download original PDF", function () {
+        self._download();
+      }),
+      iconButton(ICONS.close, "Close", function () {
+        self.close();
+      }, "mpa-close"),
+    ]);
+
+    var pagebar = el("div", { class: "mpa-pagebar" }, [
+      el("div", { class: "mpa-pagebar-group" }, [
+        iconButton(ICONS.prev, "Previous page", function () {
+          self.goToPage((self.currentPage || 1) - 1);
         }),
         this.pageInput,
         this.pageCountLabel,
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Next page",
-          text: "›",
-          onclick: function () {
-            self.goToPage((self.currentPage || 1) + 1);
-          },
+        iconButton(ICONS.next, "Next page", function () {
+          self.goToPage((self.currentPage || 1) + 1);
         }),
       ]),
-      el("div", { class: "mpa-header-group" }, [
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Zoom out",
-          text: "−",
-          onclick: function () {
-            self._zoomBy(0.9);
-          },
+      el("div", { class: "mpa-pagebar-group" }, [
+        iconButton(ICONS.zoomOut, "Zoom out", function () {
+          self._zoomBy(0.9);
         }),
         this.zoomLabel,
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Zoom in",
-          text: "+",
-          onclick: function () {
-            self._zoomBy(1.1);
-          },
+        iconButton(ICONS.zoomIn, "Zoom in", function () {
+          self._zoomBy(1.1);
         }),
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Fit width",
-          text: "Fit W",
-          onclick: function () {
-            self._fitWidth();
-          },
+        iconButton(ICONS.fitWidth, "Fit width", function () {
+          self._fitWidth();
         }),
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Fit page",
-          text: "Fit P",
-          onclick: function () {
-            self._fitPage();
-          },
-        }),
-      ]),
-      el("div", { class: "mpa-header-group" }, [this.searchInput, this.searchStatus]),
-      el("div", { class: "mpa-header-group" }, [
-        this.saveLabel,
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Fullscreen",
-          text: "⛶",
-          onclick: function () {
-            self._toggleFullscreen();
-          },
-        }),
-        el("button", {
-          class: "mpa-btn",
-          type: "button",
-          title: "Download original PDF",
-          text: "⬇",
-          onclick: function () {
-            self._download();
-          },
-        }),
-        el("button", {
-          class: "mpa-btn mpa-close",
-          type: "button",
-          title: "Close",
-          text: "✕",
-          onclick: function () {
-            self.close();
-          },
+        iconButton(ICONS.fitPage, "Fit page", function () {
+          self._fitPage();
         }),
       ]),
     ]);
 
-    this.toolButtons = el("div", { class: "mpa-tools" });
-    [
-      ["select", "Select (V)"],
-      ["pan", "Pan (Space)"],
-      ["pen", "Pen (P)"],
-      ["highlight", "Highlight (H)"],
-      ["eraser", "Eraser (E)"],
-    ].forEach(function (pair) {
-      self.toolButtons.appendChild(
-        el("button", {
-          class: "mpa-btn mpa-tool-btn",
-          type: "button",
-          "data-tool": pair[0],
-          title: pair[1],
-          text: pair[1].split(" ")[0],
-          onclick: function () {
-            self._setTool(pair[0]);
-          },
-        }),
-      );
-    });
+    this.toolButtons = el("div", { class: "mpa-tools" }, [
+      toolButton("select", ICONS.select, "Select (V)", function () {
+        self._setTool("select");
+      }),
+      toolButton("pan", ICONS.pan, "Pan (Space)", function () {
+        self._setTool("pan");
+      }),
+      toolButton("pen", ICONS.pen, "Pen (P)", function () {
+        self._setTool("pen");
+      }),
+      toolButton("highlight", ICONS.highlight, "Highlight (H)", function () {
+        self._setTool("highlight");
+      }),
+      toolButton("eraser-precision", ICONS.eraserPrecision, "Eraser (E) — erases only what you drag over", function () {
+        self._setTool("eraser-precision");
+      }),
+      toolButton("eraser-stroke", ICONS.eraserStroke, "Erase whole stroke (Shift+E)", function () {
+        self._setTool("eraser-stroke");
+      }),
+    ]);
 
     var colorRow = el("div", { class: "mpa-colors" });
+    var customSwatch = el("button", { class: "mpa-swatch mpa-swatch-custom", type: "button", title: "Custom color…" });
+    var customIcon = icon(ICONS.palette);
+    customSwatch.appendChild(customIcon);
+    var customColorInput = el("input", {
+      class: "mpa-color-native",
+      type: "color",
+      value: self.color,
+      "aria-label": "Custom color",
+      oninput: function () {
+        self.color = customColorInput.value;
+        customSwatch.style.background = self.color;
+        if (customIcon.parentNode) customSwatch.removeChild(customIcon);
+        markActiveSwatch(customSwatch);
+      },
+    });
+    customSwatch.addEventListener("click", function () {
+      customColorInput.click();
+    });
+
+    function markActiveSwatch(active) {
+      Array.prototype.slice.call(colorRow.querySelectorAll(".mpa-swatch")).forEach(function (c) {
+        c.classList.toggle("mpa-active", c === active);
+      });
+    }
+
     COLORS.forEach(function (color) {
       var swatch = el("button", {
         class: "mpa-swatch",
@@ -1110,14 +1336,14 @@
         style: "background:" + color,
         onclick: function () {
           self.color = color;
-          Array.prototype.slice.call(colorRow.children).forEach(function (c) {
-            c.classList.toggle("mpa-active", c === swatch);
-          });
+          markActiveSwatch(swatch);
         },
       });
       if (color === self.color) swatch.classList.add("mpa-active");
       colorRow.appendChild(swatch);
     });
+    colorRow.appendChild(customSwatch);
+    colorRow.appendChild(customColorInput);
 
     var sizeRow = el("div", { class: "mpa-sizes" });
     SIZES.forEach(function (size) {
@@ -1140,23 +1366,11 @@
     var toolbar = el("div", { class: "mpa-toolbar" }, [
       this.toolButtons,
       el("span", { class: "mpa-sep" }),
-      el("button", {
-        class: "mpa-btn",
-        type: "button",
-        title: "Undo (Ctrl/Cmd+Z)",
-        text: "Undo",
-        onclick: function () {
-          self.manager.undo();
-        },
+      iconButton(ICONS.undo, "Undo (Ctrl/Cmd+Z)", function () {
+        self.manager.undo();
       }),
-      el("button", {
-        class: "mpa-btn",
-        type: "button",
-        title: "Redo (Ctrl/Cmd+Shift+Z)",
-        text: "Redo",
-        onclick: function () {
-          self.manager.redo();
-        },
+      iconButton(ICONS.redo, "Redo (Ctrl/Cmd+Shift+Z)", function () {
+        self.manager.redo();
       }),
       el("span", { class: "mpa-sep" }),
       colorRow,
@@ -1169,11 +1383,24 @@
     this.scrollEl.appendChild(this.pagesEl);
 
     this.root = el("div", { class: "mpa-root", role: "dialog", "aria-modal": "true" }, [
-      header,
+      topbar,
+      pagebar,
+      this.searchBar,
       toolbar,
       this.statusEl,
       this.scrollEl,
     ]);
+  };
+
+  PDFAnnotationViewer.prototype._toggleSearchBar = function (force) {
+    var show = force !== undefined ? force : !this.root.classList.contains("mpa-search-open");
+    this.root.classList.toggle("mpa-search-open", show);
+    if (show) {
+      this.searchInput.focus();
+    } else {
+      this.searchInput.value = "";
+      this.search("");
+    }
   };
 
   // ---------------------------------------------------------------------
@@ -1220,24 +1447,34 @@
     },
   };
 
+  // Clicking a PDF attachment opens the annotator directly — that's the
+  // "link the annotator to the attached file" behavior — while a small
+  // icon button preserves the plain download Memos offered before. A
+  // modified click (ctrl/cmd/shift/alt/middle-click) is left alone so
+  // "open in new tab" / "save link as" still work as the browser expects.
   function decorateAttachmentLink(anchor) {
     if (anchor.dataset.mpaProcessed) return;
     var documentId = MemosAdapter.getAttachmentId(anchor);
     if (!documentId) return;
     anchor.dataset.mpaProcessed = "1";
+    anchor.classList.add("mpa-linked-attachment");
+    anchor.title = "Open " + MemosAdapter.getFilename(anchor) + " in the PDF viewer";
 
-    var btn = el("button", {
-      class: "mpa-annotate-trigger",
-      type: "button",
-      title: "Open PDF viewer & annotate",
-      text: "Annotate",
-      onclick: function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        openViewer(MemosAdapter.getAttachmentUrl(anchor), documentId, MemosAdapter.getFilename(anchor));
-      },
+    anchor.addEventListener("click", function (e) {
+      if (e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      openViewer(MemosAdapter.getAttachmentUrl(anchor), documentId, MemosAdapter.getFilename(anchor));
     });
-    anchor.insertAdjacentElement("afterend", btn);
+
+    var downloadBtn = iconButton(ICONS.download, "Download original PDF", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var a = el("a", { href: MemosAdapter.getAttachmentUrl(anchor), download: MemosAdapter.getFilename(anchor) });
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }, "mpa-download-trigger");
+    anchor.insertAdjacentElement("afterend", downloadBtn);
   }
 
   function openViewer(url, documentId, filename) {
@@ -1262,6 +1499,7 @@
   }
 
   function bootstrap() {
+    ensureIconFont();
     scanForAttachments();
     var observer = new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i++) {

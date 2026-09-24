@@ -25,20 +25,35 @@ control, and review the source before installing.
 
 ## What it does today
 
-- Detects PDF attachments wherever Memos renders them (memo feed, memo
-  detail, etc.) and adds an **Annotate** button next to the existing
-  download link.
+- **Clicking a PDF attachment opens the annotator directly** — the
+  attachment link itself is the trigger, not a separate button. A small
+  icon-only download button sits next to it for grabbing the plain file.
+  A modified click (Ctrl/Cmd/Shift/Alt/middle-click) is left alone so
+  "open in new tab" / "save link as" still behave normally.
 - Opens a modal PDF viewer built on [PDF.js](https://mozilla.github.io/pdf.js/)
   (loaded from cdnjs, pinned to a specific version) with:
   page navigation, page number/count, zoom in/out, fit width, fit page,
-  page-level search, fullscreen, download original, close.
-- Lets you draw on the page with **Pen** or **Highlight**, remove strokes
-  with **Eraser**, and navigate without drawing with **Select** or **Pan**.
+  page-level search (collapsible search bar), fullscreen, download
+  original, close.
+- Lets you draw with **Pen** or **Highlight**, erase with either the
+  **precision eraser** (removes only what you actually drag over,
+  splitting a stroke into whatever survives on either side — like a real
+  eraser) or the **stroke eraser** (deletes a whole stroke in one touch),
+  and navigate without drawing with **Select** or **Pan**.
+- A curated 6-color palette plus a **custom color** swatch backed by the
+  browser's native color picker, so any color is reachable — the native
+  picker is touch- and mobile-friendly for free.
 - Supports mouse, touch, and stylus via Pointer Events, with
   `touch-action: none` on the drawing surface so drawing doesn't scroll
-  the page.
-- Undo/redo at the stroke (operation) level, color and pen-size choice,
-  and keyboard shortcuts (see below).
+  the page. On narrow/touch screens the drawing toolbar pins to the
+  bottom of the screen (thumb reach) and every control grows to a
+  44px-minimum touch target; the page/search bars scroll horizontally
+  instead of wrapping into a cramped header.
+- Icons are [Material Symbols](https://fonts.google.com/icons) (Google
+  Fonts), loaded once and reused for every button.
+- Undo/redo at the operation level — a single stroke, or a whole
+  precision-eraser drag (which can touch several strokes) undoes in one
+  step — plus color and pen-size choice, and keyboard shortcuts (below).
 - Debounced autosave with a "Saving… / Saved / Unsaved changes" indicator.
 - Persists annotations in **IndexedDB**, keyed by the attachment's stable
   resource id (`attachments/{uid}`, parsed from its `/file/...` URL) —
@@ -54,7 +69,8 @@ control, and review the source before installing.
 | `V` | Select tool |
 | `H` | Highlight tool |
 | `P` | Pen tool |
-| `E` | Eraser tool |
+| `E` | Precision (area) eraser |
+| `Shift` + `E` | Stroke eraser (deletes the whole stroke) |
 | Hold `Space` | Temporary pan, restores previous tool on release |
 | `Ctrl`/`Cmd` + `Z` | Undo |
 | `Ctrl`/`Cmd` + `Shift` + `Z` | Redo |
@@ -120,8 +136,13 @@ attachment:
 
 `type` is `"ink"` for the Pen tool and `"highlight"` for the Highlight
 tool (a wider, translucent, `mix-blend-mode: multiply` stroke — see
-[Deferred](#deferred--known-limitations)). Eraser deletes whole
-annotations; it does not split strokes.
+[Deferred](#deferred--known-limitations)). The stroke eraser deletes a
+whole annotation outright. The precision eraser instead removes only the
+points inside the eraser's radius and replaces the original annotation
+with zero, one, or two new annotations (fresh ids) for whatever survives
+on either side — the whole drag commits as a single `AnnotationManager`
+operation (`applyErase`), so one undo restores the original stroke
+regardless of how many fragments the drag produced.
 
 ### Performance
 
@@ -154,18 +175,27 @@ annotations; it does not split strokes.
   support yet); if you'd rather not depend on a CDN, vendor
   `pdf.min.mjs` and `pdf.worker.min.mjs` yourself and change `PDFJS_BASE`
   at the top of `memos-pdf-annotate.js`.
+- Icons load one `<link>` stylesheet from `fonts.googleapis.com`
+  (Material Symbols). Google Fonts has served this without setting
+  tracking cookies since 2022; if you'd rather avoid the extra request
+  entirely, self-host the font files and change `ICON_FONT_HREF`.
 
 ## Verification
 
 This lives outside `web/` and `server/`, so it isn't covered by
-`pnpm test`/`go test`. It was instead smoke-tested end-to-end with a
-headless-Chromium Playwright script against a static harness page (a
+`pnpm test`/`go test`. It was instead smoke-tested end-to-end with
+headless-Chromium Playwright scripts against a static harness page (a
 fake attachment link plus a locally generated 2-page PDF), covering:
-Annotate button injection, opening the viewer, drawing with the Pen tool,
-autosave reaching "Saved", the exact Phase 1 milestone (close the viewer,
-reopen it, the stroke is still there), undo/redo, page-level search,
-the Eraser removing only the targeted stroke, the Highlight tool storing
-a `"highlight"`-typed annotation, and the dark-mode CSS variable swap.
+clicking the attachment link itself to open the viewer, drawing with the
+Pen tool, autosave reaching "Saved", the exact Phase 1 milestone (close
+the viewer, reopen it, the stroke is still there), undo/redo, page-level
+search, the Highlight tool storing a `"highlight"`-typed annotation, the
+dark-mode CSS variable swap, the precision eraser splitting a stroke into
+two fragments with a single compound undo restoring the original, the
+stroke eraser deleting a whole stroke in one action, the custom color
+picker updating the active drawing color, and — at a mobile-width,
+touch-enabled viewport — the toolbar pinning to the bottom of the screen
+with enlarged touch targets.
 
 ## Roadmap
 
