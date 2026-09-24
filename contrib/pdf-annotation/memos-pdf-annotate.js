@@ -19,7 +19,7 @@
   if (window.__memosPdfAnnotate) {
     return;
   }
-  window.__memosPdfAnnotate = { version: "0.2.0" };
+  window.__memosPdfAnnotate = { version: "0.4.0" };
 
   var PDFJS_VERSION = "4.7.76";
   var PDFJS_BASE = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/" + PDFJS_VERSION + "/";
