@@ -174,67 +174,6 @@ func saveAttachmentContent(
 	return nil
 }
 
-// replaceAttachmentContent overwrites an existing attachment's stored bytes
-// in place, keeping its current location (local file path, S3 key, or
-// database row) so the attachment's name and URL never change. It does not
-// re-run the create-time processing pipeline (EXIF stripping, motion photo
-// detection) — callers write already-finished content, such as a flattened
-// PDF export.
-//
-// For LOCAL and S3 storage the new bytes are written as a side effect of
-// this call; the returned blob is nil since there is nothing left for the
-// caller's store.UpdateAttachment to persist. For DATABASE storage nothing
-// is written here — the content is returned for the caller to pass through
-// store.UpdateAttachment.Blob in the same request.
-func replaceAttachmentContent(
-	ctx context.Context,
-	profile *profile.Profile,
-	stores *store.Store,
-	attachment *store.Attachment,
-	content []byte,
-) (blobForUpdate []byte, size int64, err error) {
-	switch attachment.StorageType {
-	case storepb.AttachmentStorageType_LOCAL:
-		attachmentPath := filepath.FromSlash(attachment.Reference)
-		if !filepath.IsAbs(attachmentPath) {
-			attachmentPath = filepath.Join(profile.Data, attachmentPath)
-		}
-		dir := filepath.Dir(attachmentPath)
-		file, err := os.CreateTemp(dir, ".memos-upload-*")
-		if err != nil {
-			return nil, 0, errors.Wrap(err, "failed to create attachment file")
-		}
-		defer os.Remove(file.Name())
-		defer file.Close()
-		if _, err := file.Write(content); err != nil {
-			return nil, 0, errors.Wrap(err, "failed to write attachment file")
-		}
-		if err := file.Chmod(0644); err != nil {
-			return nil, 0, errors.Wrap(err, "failed to set attachment permissions")
-		}
-		if err := file.Close(); err != nil {
-			return nil, 0, errors.Wrap(err, "failed to close attachment file")
-		}
-		if err := os.Rename(file.Name(), attachmentPath); err != nil {
-			return nil, 0, errors.Wrap(err, "failed to replace attachment file")
-		}
-		return nil, int64(len(content)), nil
-	case storepb.AttachmentStorageType_S3:
-		driver, s3Object, err := stores.ResolveAttachmentS3Driver(ctx, attachment)
-		if err != nil {
-			return nil, 0, errors.Wrap(err, "failed to resolve S3 attachment driver")
-		}
-		if _, err := driver.UploadObject(ctx, s3Object.Key, attachment.Type, bytes.NewReader(content)); err != nil {
-			return nil, 0, errors.Wrap(err, "failed to upload replacement object")
-		}
-		return nil, int64(len(content)), nil
-	case storepb.AttachmentStorageType_EXTERNAL:
-		return nil, 0, errors.New("cannot replace the content of an externally linked attachment")
-	default:
-		return content, int64(len(content)), nil
-	}
-}
-
 func cleanupSavedAttachmentBlob(
 	ctx context.Context,
 	stores *store.Store,

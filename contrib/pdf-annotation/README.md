@@ -1,33 +1,22 @@
 # Memos PDF Annotation + Handwriting (prototype)
 
-A lightweight PDF reader/annotator and handwriting layer for Memos. The
-drawing/viewing UI is injected **custom JavaScript + CSS** and does not
-touch Memos' own code. One feature — **saving the annotated PDF back over
-the original attachment** — does require a small, real backend change
-(see [Save annotated PDF to Memos](#save-annotated-pdf-to-memos)); it's
-included in this same PR/branch under `server/` and `store/`. Everything
-else works against a stock, unmodified Memos. This is the Phase 1/2
-prototype described in the build spec, plus a slice of Phase 3/5; see
-[Roadmap](#roadmap) for what's still deliberately deferred.
+A lightweight PDF reader/annotator and handwriting layer for Memos, built
+entirely as injected **custom JavaScript + CSS** — it does not modify
+Memos itself. This is the Phase 1/2 prototype described in the build spec;
+see [Roadmap](#roadmap) for what's deliberately deferred.
 
 ## Install
 
-1. **Deploy this branch's backend** (only needed for the Save-to-Memos
-   button — skip this step if you don't need it, everything else works
-   against a stock Memos): build/run the server from this branch/PR so
-   the `content` field is accepted by `UpdateAttachment` (see
-   [Backend changes](#backend-changes)).
-2. Sign in as a Memos admin and open **Settings → General**.
-3. Paste the contents of `memos-pdf-annotate.js` into **Additional Script**.
-4. Paste the contents of `memos-pdf-annotate.css` into **Additional Style**.
-5. Save. Reload any page that shows a memo with a PDF attachment.
+1. Sign in as a Memos admin and open **Settings → General**.
+2. Paste the contents of `memos-pdf-annotate.js` into **Additional Script**.
+3. Paste the contents of `memos-pdf-annotate.css` into **Additional Style**.
+4. Save. Reload any page that shows a memo with a PDF attachment.
 
 Memos injects the script as a single classic `<script>` tag on every page
 load (`web/src/App.tsx`), which is why this stays a self-contained IIFE
 with no build step and no bundler-style `import` statements at the top
 level (it does use a runtime `import()` to lazy-load PDF.js as an ES
-module, and a plain `<script src>` tag to load pdf-lib's UMD build — both
-work fine from inside a classic script).
+module — that works fine from inside a classic script).
 
 This is workspace-wide, admin-controlled, and affects every user's
 browser. Because it runs with full page privileges, treat it the same as
@@ -72,12 +61,6 @@ control, and review the source before installing.
   reopening the same attachment (even after a full reload) shows the same
   strokes.
 - Matches Memos' light/dark/system theme via `html[data-theme$="dark"]`.
-- **Save annotated PDF to Memos** (topbar cloud-upload icon): flattens
-  every stroke into real vector graphics on a copy of the original PDF
-  and replaces the attachment's stored bytes in place — a normal download
-  of that same attachment then serves the annotated version. See
-  [below](#save-annotated-pdf-to-memos) for how this works and what it
-  requires.
 
 ### Keyboard shortcuts
 
@@ -161,92 +144,6 @@ on either side — the whole drag commits as a single `AnnotationManager`
 operation (`applyErase`), so one undo restores the original stroke
 regardless of how many fragments the drag produced.
 
-### Save annotated PDF to Memos
-
-Clicking the cloud-upload icon:
-
-1. Confirms with the user (`window.confirm`) — this replaces the
-   downloadable original, which cannot be recovered afterward, so it asks
-   before doing it.
-2. Fetches the original PDF bytes and loads them with
-   [pdf-lib](https://pdf-lib.js.org/) (loaded from cdnjs as a classic
-   `<script>`, exposing a `window.PDFLib` global — no bundler needed).
-3. Draws every stored `ink`/`highlight` annotation onto the matching page
-   as a real vector path via `page.drawSvgPath(...)`, reusing the exact
-   same `d` string the SVG annotation layer already draws on screen, so
-   what you see is what gets baked in.
-4. Calls `pdfDoc.save()` to get the flattened PDF's bytes, then sends them
-   to Memos as a hand-built Connect RPC request:
-
-   ```
-   POST /memos.api.v1.AttachmentService/UpdateAttachment
-   Content-Type: application/json
-   Authorization: Bearer <token from localStorage["memos_access_token"]>
-
-   {"attachment": {"name": "attachments/{uid}", "content": "<base64>"},
-    "updateMask": "content"}
-   ```
-
-   There's no generated TypeScript client available inside a plain
-   injected script, but Connect's JSON codec is a normal unary POST any
-   `fetch` can make — no protobuf binary framing needed. The access token
-   is read directly from `localStorage`, the same place Memos' own
-   frontend (`web/src/auth-state.ts`) keeps it; this script never mints or
-   stores a token itself. If it's missing or expired, the request 401s and
-   the status bar says to reload Memos and try again — this doesn't try to
-   replicate Memos' own token-refresh flow.
-
-The IndexedDB annotation objects (the individually editable strokes) are
-untouched by this — "flattening" only affects the copy of the PDF that
-gets uploaded. You can keep editing and re-save as many times as you like;
-each save re-flattens the current state over the (by-then-already-
-annotated) attachment.
-
-**Only `ink` and `highlight` annotations are flattened today** (the only
-types this build produces — see [Deferred](#deferred--known-limitations)).
-Highlight opacity/blend renders as a translucent stroke in the output PDF,
-not a true multiply blend (PDF blend modes need pdf-lib's lower-level
-graphics-state API, not attempted here).
-
-#### Backend changes
-
-`UpdateAttachment` previously only supported renaming
-(`server/api/v1/attachment_service.go`). This PR extends it to also accept
-`content` in the update mask, replacing the attachment's stored bytes
-*in place* — same id, same filename, same `/file/...` URL — across all
-three storage backends:
-
-| Storage | What happens |
-| --- | --- |
-| Database | New bytes go straight into `attachment.blob`/`attachment.size`. |
-| Local disk | The file at the attachment's existing `Reference` path is overwritten atomically (temp file + rename), same as `saveAttachmentContent` on create. |
-| S3 | `driver.UploadObject` re-PUTs the object at its existing key (`ResolveAttachmentS3Driver` resolves the same driver/credentials the create path uses). |
-
-New/changed Go: `store.UpdateAttachment` gained `Blob`/`Size` fields; the
-three `store/db/{sqlite,mysql,postgres}/attachment.go` drivers apply them
-in their `SET` clause; `server/api/v1/attachment_service_storage.go` gained
-`replaceAttachmentContent`, which does the local-file/S3 overwrite (or
-just returns the blob for the database case); `UpdateAttachment`'s handler
-wires `"content"` into the same upload-size check and per-user rate limit
-(`ratelimit.ScopeUploadUser`) that `CreateAttachment` already uses. No
-`.proto` changes were needed — `Attachment.content` already existed as an
-`INPUT_ONLY` field for create; this just teaches update to honor it too.
-
-This does **not** re-run the create-time processing pipeline (EXIF
-stripping, motion-photo detection) — it's meant for already-finished
-content like a flattened PDF, not raw uploads. It also doesn't re-sniff or
-change the stored MIME type, so it's only meaningful for replacing content
-of the same type.
-
-Covered by `server/api/v1/test/attachment_service_test.go`
-(`TestUpdateAttachmentContent`, database + local-disk cases) and
-`attachment_service_s3_test.go` (`TestUpdateAttachmentContentS3`, using
-the in-process `fakes3` test server — no Docker required). Also manually
-verified against a real running `go run ./cmd/memos` instance: created a
-real attachment, replaced its content through the exact request shape
-above, and confirmed a plain `/file/...` download served the new bytes at
-the same URL.
-
 ### Performance
 
 - Pages are virtualized: an `IntersectionObserver` (root margin ±100% of
@@ -282,17 +179,6 @@ the same URL.
   (Material Symbols). Google Fonts has served this without setting
   tracking cookies since 2022; if you'd rather avoid the extra request
   entirely, self-host the font files and change `ICON_FONT_HREF`.
-- pdf-lib is loaded from `cdnjs.cloudflare.com`, pinned to `1.17.1`. It
-  only runs in the browser tab that clicks "Save to Memos"; it never
-  touches PDF.js's rendering path or the on-screen viewer.
-- Saving to Memos reuses Memos' own authorization (the same access token
-  the app already holds), the same per-user upload rate limit, and the
-  same upload size limit as a normal attachment upload — this doesn't add
-  a new, less-guarded write path, just a new field on an existing,
-  already-authorized RPC.
-- Because replacing content is irreversible (the original bytes are gone
-  once overwritten), the button confirms with the user first and never
-  fires automatically alongside the debounced IndexedDB autosave.
 
 ## Verification
 
@@ -311,43 +197,25 @@ picker updating the active drawing color, and — at a mobile-width,
 touch-enabled viewport — the toolbar pinning to the bottom of the screen
 with enlarged touch targets.
 
-The backend change (`UpdateAttachment` accepting `content`) *is* inside
-`server/`/`store/`, so it's covered by real Go tests
-(`go test ./server/... ./store/...`, all passing, including `-race`) for
-the database, local-disk, and S3 (via the in-process `fakes3` fake, no
-Docker needed) storage backends. The client-side flatten step was also
-verified against a real running `go run ./cmd/memos` instance: fetched a
-real attachment's bytes, flattened them with the actual pdf-lib build this
-script loads (same `drawSvgPath` call shape), uploaded the result through
-the real `UpdateAttachment` endpoint, and confirmed a plain file download
-served the new, larger, still-valid PDF at the same URL.
-
 ## Roadmap
 
 This intentionally does **not** try to build the whole spec at once (the
-spec itself says not to). What's implemented is Phase 1 in full, the
-low-risk parts of Phase 2, and a slice of Phases 3 and 5 (see
-[Save annotated PDF to Memos](#save-annotated-pdf-to-memos)). Deferred, in
-spec order:
+spec itself says not to). What's implemented is Phase 1 in full and the
+low-risk parts of Phase 2. Deferred, in spec order:
 
 - **Phase 2 remainder**: Underline, Strikeout, and real Text annotations.
   These need PDF.js's text layer for proper text-position anchoring;
   adding a half-working, non-text-anchored version wasn't worth the
   complexity for this pass.
-- **Phase 3 — Memos persistence, remainder**: only the *flattened result*
-  is saved to Memos (as the attachment's content); the live, individually
-  editable annotation objects still live in IndexedDB only, not behind a
-  Memos API. `AnnotationManager` already treats storage as an interface
-  (`load`/`save`), so pointing it at a real annotations endpoint later
-  should be a localized change, but that endpoint doesn't exist yet.
+- **Phase 3 — Memos persistence**: swap `AnnotationStore`'s IndexedDB
+  calls for real Memos API calls (once such an endpoint exists — see
+  spec section 6/7). `AnnotationManager` already treats storage as an
+  interface (`load`/`save`) with no other code depending on IndexedDB
+  directly, so this should be a localized change.
 - **Phase 4 — standalone handwriting canvas** (drawing not tied to a PDF).
-- **Phase 5 — export annotated PDF, remainder**: only the flattened
-  variant is implemented, and it replaces the original rather than saving
-  alongside it as `textbook-annotated.pdf`. A "keep both" export and a
-  manual "download the flattened PDF without touching Memos" option
-  aren't built.
-- **Phase 6 — native Memos feature** (Go models, dedicated API endpoints,
-  React components, migrations, tests) if this prototype proves out.
+- **Phase 5 — export annotated PDF** (non-destructive and flattened).
+- **Phase 6 — native Memos feature** (Go models, API endpoints, React
+  components, migrations, tests) if this prototype proves out.
 
 ### Deferred / known limitations
 

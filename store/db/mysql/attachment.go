@@ -282,12 +282,6 @@ func applyMySQLAttachmentUpdate(ctx context.Context, executor memoUpdateExecer, 
 		}
 		set, args = append(set, "`payload` = ?"), append(args, string(bytes))
 	}
-	if v := update.Blob; v != nil {
-		set, args = append(set, "`blob` = ?"), append(args, v)
-	}
-	if v := update.Size; v != nil {
-		set, args = append(set, "`size` = ?"), append(args, *v)
-	}
 
 	if len(set) == 0 {
 		return nil

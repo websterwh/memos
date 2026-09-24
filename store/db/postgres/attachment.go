@@ -268,12 +268,6 @@ func applyPostgresAttachmentUpdate(ctx context.Context, executor memoUpdateExece
 		}
 		set, args = append(set, "payload = "+placeholder(len(args)+1)), append(args, string(bytes))
 	}
-	if v := update.Blob; v != nil {
-		set, args = append(set, "blob = "+placeholder(len(args)+1)), append(args, v)
-	}
-	if v := update.Size; v != nil {
-		set, args = append(set, "size = "+placeholder(len(args)+1)), append(args, *v)
-	}
 
 	if len(set) == 0 {
 		return nil

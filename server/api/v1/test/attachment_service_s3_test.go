@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/usememos/memos/internal/testutil/fakes3"
 	v1pb "github.com/usememos/memos/proto/gen/api/v1"
@@ -230,56 +229,6 @@ func TestGetLegacyS3AttachmentBlob(t *testing.T) {
 		_, err = fake.GetObject(currentConfig.Bucket, key)
 		require.Error(t, err, "deleting a legacy attachment must use the current matching storage configuration")
 	})
-}
-
-// TestUpdateAttachmentContentS3 covers the S3 leg of replaceAttachmentContent:
-// the object must be overwritten at its existing key (no new key, no
-// leftover object), matching how the PDF annotator saves a flattened PDF
-// back over the original when Memos is configured for S3 storage.
-func TestUpdateAttachmentContentS3(t *testing.T) {
-	ctx := context.Background()
-	fake := fakes3.New(t, "attachments")
-	ts := NewTestService(t)
-	defer ts.Cleanup()
-
-	user, err := ts.CreateRegularUser(ctx, "s3-content-replace-user")
-	require.NoError(t, err)
-	userCtx := ts.CreateUserContext(ctx, user.ID)
-	storage := fakeStorage("s3-content-replace", "S3", fake.Config("attachments"))
-	upsertS3StorageSetting(ctx, t, ts, storage.Id, storage)
-
-	created, err := ts.Service.CreateAttachment(userCtx, &v1pb.CreateAttachmentRequest{
-		Attachment: &v1pb.Attachment{Filename: "report.pdf", Type: "application/pdf", Content: []byte("%PDF-1.4 original")},
-	})
-	require.NoError(t, err)
-	uid, err := apiv1.ExtractAttachmentUIDFromName(created.Name)
-	require.NoError(t, err)
-	before, err := ts.Store.GetAttachment(ctx, &store.FindAttachment{UID: &uid})
-	require.NoError(t, err)
-	require.Equal(t, storepb.AttachmentStorageType_S3, before.StorageType)
-	key := before.Payload.GetS3Object().GetKey()
-	require.NotEmpty(t, key)
-
-	newContent := []byte("%PDF-1.4 flattened-with-annotations")
-	updated, err := ts.Service.UpdateAttachment(userCtx, &v1pb.UpdateAttachmentRequest{
-		Attachment: &v1pb.Attachment{Name: created.Name, Content: newContent},
-		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"content"}},
-	})
-	require.NoError(t, err)
-	require.Equal(t, int64(len(newContent)), updated.Size)
-
-	after, err := ts.Store.GetAttachment(ctx, &store.FindAttachment{UID: &uid})
-	require.NoError(t, err)
-	require.Equal(t, key, after.Payload.GetS3Object().GetKey(), "must overwrite the existing object, not create a new one")
-	require.Equal(t, storage.Id, after.Payload.GetS3Object().GetStorageId())
-
-	objectContent, err := fake.GetObject("attachments", key)
-	require.NoError(t, err)
-	require.Equal(t, newContent, objectContent)
-
-	blob, err := ts.Service.GetAttachmentBlob(ctx, after)
-	require.NoError(t, err)
-	require.Equal(t, newContent, blob)
 }
 
 func fakeStorage(id, name string, config *storepb.StorageS3Config) *storepb.Storage {
