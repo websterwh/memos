@@ -24,6 +24,8 @@
   var PDFJS_VERSION = "4.7.76";
   var PDFJS_BASE = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/" + PDFJS_VERSION + "/";
 
+  var PDFLIB_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
+
   var DB_NAME = "memos-pdf-annotations";
   var DB_VERSION = 1;
   var STORE_NAME = "documents";
@@ -141,6 +143,38 @@
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+
+  function hexToUnitRGB(hex) {
+    var match = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+    if (!match) return { r: 0, g: 0, b: 0 };
+    return {
+      r: parseInt(match[1], 16) / 255,
+      g: parseInt(match[2], 16) / 255,
+      b: parseInt(match[3], 16) / 255,
+    };
+  }
+
+  function downloadOriginal(url, filename) {
+    var a = el("a", { href: url, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  // Triggers a browser download of in-memory bytes without ever touching
+  // the server — used so "download" can hand back a freshly flattened PDF
+  // instead of the plain original.
+  function downloadBlob(bytes, filename, mimeType) {
+    var blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
+    var url = URL.createObjectURL(blob);
+    var a = el("a", { href: url, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 10000);
   }
 
   // ---------------------------------------------------------------------
@@ -388,6 +422,72 @@
       });
     }
     return pdfjsLibPromise;
+  }
+
+  // pdf-lib (for flattening annotations into a downloaded PDF) ships a
+  // classic UMD build, so a plain <script src> tag is enough — no dynamic
+  // import needed here, unlike pdf.js.
+  var pdfLibPromise = null;
+
+  function loadPdfLib() {
+    if (!pdfLibPromise) {
+      pdfLibPromise = new Promise(function (resolve, reject) {
+        if (window.PDFLib) {
+          resolve(window.PDFLib);
+          return;
+        }
+        var script = el("script", {
+          src: PDFLIB_URL,
+          onload: function () {
+            resolve(window.PDFLib);
+          },
+          onerror: function () {
+            reject(new Error("Failed to load pdf-lib"));
+          },
+        });
+        document.head.appendChild(script);
+      });
+    }
+    return pdfLibPromise;
+  }
+
+  // Fetches the original PDF and bakes every ink/highlight annotation into
+  // a copy of it as real vector graphics (pdf-lib's drawSvgPath, reusing
+  // the exact same 'd' string the SVG annotation layer already draws), and
+  // resolves with the flattened bytes. Nothing is uploaded anywhere — the
+  // caller decides what to do with the bytes (see downloadBlob usage
+  // below). Purely client-side: no Memos API beyond the existing,
+  // unmodified same-origin GET for the attachment's own bytes.
+  function flattenAnnotatedPdf(url, annotations) {
+    return Promise.all([
+      loadPdfLib(),
+      fetch(url, { credentials: "include" }).then(function (resp) {
+        if (!resp.ok) throw new Error("failed to fetch the original PDF (" + resp.status + ")");
+        return resp.arrayBuffer();
+      }),
+    ]).then(function (results) {
+      var PDFLib = results[0];
+      var originalBytes = results[1];
+      return PDFLib.PDFDocument.load(originalBytes).then(function (pdfDoc) {
+        var pages = pdfDoc.getPages();
+        annotations.forEach(function (annotation) {
+          if (annotation.type !== "ink" && annotation.type !== "highlight") return;
+          var page = pages[annotation.page - 1];
+          if (!page) return;
+          var rgb = hexToUnitRGB(annotation.style.color);
+          page.drawSvgPath(pointsToPath(annotation.data.points), {
+            x: 0,
+            y: page.getHeight(),
+            scale: 1,
+            borderColor: PDFLib.rgb(rgb.r, rgb.g, rgb.b),
+            borderWidth: annotation.style.width,
+            borderOpacity: annotation.style.opacity,
+            borderLineCap: PDFLib.LineCapStyle.Round,
+          });
+        });
+        return pdfDoc.save();
+      });
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -1163,11 +1263,26 @@
     }
   };
 
+  // Downloads the plain original when there's nothing drawn on it yet;
+  // otherwise flattens the current annotations in and downloads that
+  // instead — entirely in the browser, nothing is written back to Memos.
   PDFAnnotationViewer.prototype._download = function () {
-    var a = el("a", { href: this.url, download: this.filename });
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    var self = this;
+    if (!this.manager.annotations.length) {
+      downloadOriginal(this.url, this.filename);
+      return;
+    }
+    this._setStatus("Preparing annotated PDF for download…");
+    flattenAnnotatedPdf(this.url, this.manager.annotations)
+      .then(function (bytes) {
+        self._setStatus("");
+        downloadBlob(bytes, self.filename, "application/pdf");
+      })
+      .catch(function (err) {
+        console.error("[memos-pdf-annotate] failed to flatten PDF for download, falling back to the original", err);
+        self._setStatus("Couldn't include annotations in the download (" + (err && err.message ? err.message : err) + ") — downloading the original instead.");
+        downloadOriginal(self.url, self.filename);
+      });
   };
 
   PDFAnnotationViewer.prototype.close = function () {
@@ -1458,21 +1573,37 @@
     if (!documentId) return;
     anchor.dataset.mpaProcessed = "1";
     anchor.classList.add("mpa-linked-attachment");
-    anchor.title = "Open " + MemosAdapter.getFilename(anchor) + " in the PDF viewer";
+    // Captured once, before the title is overwritten below — getFilename()
+    // parses the ORIGINAL "Download {filename}" title Memos sets, so it
+    // must run before that text is replaced with our own tooltip.
+    var filename = MemosAdapter.getFilename(anchor);
+    anchor.title = "Open " + filename + " in the PDF viewer";
 
     anchor.addEventListener("click", function (e) {
       if (e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
-      openViewer(MemosAdapter.getAttachmentUrl(anchor), documentId, MemosAdapter.getFilename(anchor));
+      openViewer(MemosAdapter.getAttachmentUrl(anchor), documentId, filename);
     });
 
-    var downloadBtn = iconButton(ICONS.download, "Download original PDF", function (e) {
+    var downloadBtn = iconButton(ICONS.download, "Download PDF (includes any saved annotations)", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      var a = el("a", { href: MemosAdapter.getAttachmentUrl(anchor), download: MemosAdapter.getFilename(anchor) });
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      var url = MemosAdapter.getAttachmentUrl(anchor);
+      AnnotationStore.load(documentId)
+        .then(function (doc) {
+          var annotations = doc.annotations || [];
+          if (!annotations.length) {
+            downloadOriginal(url, filename);
+            return;
+          }
+          return flattenAnnotatedPdf(url, annotations).then(function (bytes) {
+            downloadBlob(bytes, filename, "application/pdf");
+          });
+        })
+        .catch(function (err) {
+          console.error("[memos-pdf-annotate] failed to prepare annotated download, falling back to the original", err);
+          downloadOriginal(url, filename);
+        });
     }, "mpa-download-trigger");
     anchor.insertAdjacentElement("afterend", downloadBtn);
   }

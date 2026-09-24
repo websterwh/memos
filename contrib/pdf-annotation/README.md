@@ -27,14 +27,21 @@ control, and review the source before installing.
 
 - **Clicking a PDF attachment opens the annotator directly** — the
   attachment link itself is the trigger, not a separate button. A small
-  icon-only download button sits next to it for grabbing the plain file.
-  A modified click (Ctrl/Cmd/Shift/Alt/middle-click) is left alone so
-  "open in new tab" / "save link as" still behave normally.
+  icon-only download button sits next to it. A modified click
+  (Ctrl/Cmd/Shift/Alt/middle-click) is left alone so "open in new tab" /
+  "save link as" still behave normally.
+- **Downloading gets you the annotated PDF, with no server changes at
+  all.** Both the row's download button and the viewer's own download
+  check IndexedDB first: no saved strokes yet → the plain original PDF is
+  downloaded exactly as Memos always served it; once you've drawn
+  something, the same button instead flattens your strokes into a fresh
+  copy of the PDF (via [pdf-lib](https://pdf-lib.js.org/), entirely in the
+  browser) and downloads *that* — Memos' stored attachment is never
+  touched. See [Downloading the annotated PDF](#downloading-the-annotated-pdf).
 - Opens a modal PDF viewer built on [PDF.js](https://mozilla.github.io/pdf.js/)
   (loaded from cdnjs, pinned to a specific version) with:
   page navigation, page number/count, zoom in/out, fit width, fit page,
-  page-level search (collapsible search bar), fullscreen, download
-  original, close.
+  page-level search (collapsible search bar), fullscreen, download, close.
 - Lets you draw with **Pen** or **Highlight**, erase with either the
   **precision eraser** (removes only what you actually drag over,
   splitting a stroke into whatever survives on either side — like a real
@@ -144,6 +151,38 @@ on either side — the whole drag commits as a single `AnnotationManager`
 operation (`applyErase`), so one undo restores the original stroke
 regardless of how many fragments the drag produced.
 
+### Downloading the annotated PDF
+
+Both download buttons (the one next to the attachment link, and the one in
+the viewer's topbar) go through the same check:
+
+1. Load this attachment's annotations from IndexedDB.
+2. None yet → download the original PDF exactly as before (a plain
+   `<a download>` click, no extra work).
+3. Some exist → fetch the original PDF's bytes, load them with
+   [pdf-lib](https://pdf-lib.js.org/) (loaded from cdnjs as a classic
+   `<script>`, exposing a `window.PDFLib` global — no bundler needed),
+   draw every stored `ink`/`highlight` annotation onto the matching page
+   as a real vector path via `page.drawSvgPath(...)` (reusing the exact
+   same `d` string the SVG annotation layer already draws on screen), then
+   hand the resulting bytes to the browser as a `Blob` download.
+
+This is **entirely client-side** — Memos' stored attachment is never
+written to, and no request goes anywhere except the existing, unmodified
+same-origin GET for the attachment's own bytes. That also means it only
+works from a browser that has this script loaded: a share link handed to
+someone else, or a raw `/file/...` URL, still serves the plain original,
+since there's nowhere else the annotated bytes could live without a real
+server-side change (see [Deferred](#deferred--known-limitations)). If
+pdf-lib fails to load or the flatten step throws for any reason, the
+button falls back to downloading the plain original rather than failing
+silently or blocking the download entirely.
+
+Only `ink` and `highlight` annotations are flattened (the only types this
+build produces). Highlight opacity renders as a translucent stroke in the
+output PDF, not a true multiply blend (that needs pdf-lib's lower-level
+graphics-state API, not attempted here).
+
 ### Performance
 
 - Pages are virtualized: an `IntersectionObserver` (root margin ±100% of
@@ -179,6 +218,10 @@ regardless of how many fragments the drag produced.
   (Material Symbols). Google Fonts has served this without setting
   tracking cookies since 2022; if you'd rather avoid the extra request
   entirely, self-host the font files and change `ICON_FONT_HREF`.
+- pdf-lib is loaded from `cdnjs.cloudflare.com`, pinned to `1.17.1`. It
+  only runs when a download actually has annotations to flatten, and only
+  produces a client-side `Blob` for the browser to save — it never sends
+  anything to Memos or anywhere else.
 
 ## Verification
 
@@ -197,6 +240,12 @@ picker updating the active drawing color, and — at a mobile-width,
 touch-enabled viewport — the toolbar pinning to the bottom of the screen
 with enlarged touch targets.
 
+The download flattening was additionally verified with the real pdf-lib
+build this script loads (not a mock): downloading with no annotations
+yields the byte-identical original, downloading after drawing a stroke
+(both from inside the open viewer and from the row's button with the
+viewer closed) yields a larger, valid PDF of the same size both times.
+
 ## Roadmap
 
 This intentionally does **not** try to build the whole spec at once (the
@@ -207,15 +256,23 @@ low-risk parts of Phase 2. Deferred, in spec order:
   These need PDF.js's text layer for proper text-position anchoring;
   adding a half-working, non-text-anchored version wasn't worth the
   complexity for this pass.
-- **Phase 3 — Memos persistence**: swap `AnnotationStore`'s IndexedDB
-  calls for real Memos API calls (once such an endpoint exists — see
-  spec section 6/7). `AnnotationManager` already treats storage as an
-  interface (`load`/`save`) with no other code depending on IndexedDB
-  directly, so this should be a localized change.
+- **Phase 3 — Memos persistence**: the annotation objects themselves (the
+  individually editable strokes) still live in IndexedDB only, not behind
+  a Memos API — that would need a real backend change (a way to persist
+  annotation data, or to replace an attachment's stored bytes), which is
+  out of scope for a JS/CSS-only prototype. `AnnotationManager` already
+  treats storage as an interface (`load`/`save`), so pointing it at a real
+  endpoint later should be a localized change if one is ever added.
 - **Phase 4 — standalone handwriting canvas** (drawing not tied to a PDF).
-- **Phase 5 — export annotated PDF** (non-destructive and flattened).
-- **Phase 6 — native Memos feature** (Go models, API endpoints, React
-  components, migrations, tests) if this prototype proves out.
+- **Phase 5 — export annotated PDF**: the flattened download (above)
+  covers this for "download it now"; there's no "save the flattened
+  version back into Memos" mentioned in the spec's non-destructive vs.
+  flattened distinction, since that's the Phase 3 backend gap above —
+  a JS/CSS-only build can hand you the flattened bytes but can't make
+  Memos' own copy of the attachment be those bytes.
+- **Phase 6 — native Memos feature** (Go models, dedicated API endpoints,
+  React components, migrations, tests) if this prototype proves out —
+  that would be the point to properly close the Phase 3/5 gaps above.
 
 ### Deferred / known limitations
 
