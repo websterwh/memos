@@ -145,6 +145,127 @@ func TestCreateAttachment(t *testing.T) {
 	})
 }
 
+// TestUpdateAttachmentContent covers replacing an attachment's stored bytes
+// in place (used by the PDF annotator to save a flattened, annotated PDF
+// back over the original) across every storage backend: the attachment's
+// name, filename, and location (Reference/S3 key) must stay unchanged while
+// GetAttachmentBlob returns the new bytes and Size reflects the new length.
+func TestUpdateAttachmentContent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("DatabaseStorage", func(t *testing.T) {
+		ts := NewTestService(t)
+		defer ts.Cleanup()
+		user, err := ts.CreateRegularUser(ctx, "content-replace-db-user")
+		require.NoError(t, err)
+		userCtx := ts.CreateUserContext(ctx, user.ID)
+
+		created, err := ts.Service.CreateAttachment(userCtx, &v1pb.CreateAttachmentRequest{
+			Attachment: &v1pb.Attachment{
+				Filename: "report.pdf",
+				Type:     "application/pdf",
+				Content:  []byte("%PDF-1.4 original"),
+			},
+		})
+		require.NoError(t, err)
+
+		newContent := []byte("%PDF-1.4 flattened-with-annotations")
+		updated, err := ts.Service.UpdateAttachment(userCtx, &v1pb.UpdateAttachmentRequest{
+			Attachment: &v1pb.Attachment{Name: created.Name, Content: newContent},
+			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"content"}},
+		})
+		require.NoError(t, err)
+		require.Equal(t, created.Name, updated.Name)
+		require.Equal(t, "report.pdf", updated.Filename)
+		require.Equal(t, int64(len(newContent)), updated.Size)
+
+		uid, err := apiv1.ExtractAttachmentUIDFromName(created.Name)
+		require.NoError(t, err)
+		stored, err := ts.Store.GetAttachment(ctx, &store.FindAttachment{UID: &uid})
+		require.NoError(t, err)
+		blob, err := ts.Service.GetAttachmentBlob(ctx, stored)
+		require.NoError(t, err)
+		require.Equal(t, newContent, blob)
+	})
+
+	t.Run("LocalStorage_SameFileOverwrittenInPlace", func(t *testing.T) {
+		ts := NewTestService(t)
+		defer ts.Cleanup()
+		user, err := ts.CreateRegularUser(ctx, "content-replace-local-user")
+		require.NoError(t, err)
+		userCtx := ts.CreateUserContext(ctx, user.ID)
+		_, err = ts.Store.UpsertInstanceSetting(ctx, &storepb.InstanceSetting{
+			Key: storepb.InstanceSettingKey_STORAGE,
+			Value: &storepb.InstanceSetting_StorageSetting{
+				StorageSetting: &storepb.InstanceStorageSetting{
+					StorageType:      storepb.InstanceStorageSetting_LOCAL,
+					FilepathTemplate: "assets/{filename}",
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		created, err := ts.Service.CreateAttachment(userCtx, &v1pb.CreateAttachmentRequest{
+			Attachment: &v1pb.Attachment{
+				Filename: "notes.pdf",
+				Type:     "application/pdf",
+				Content:  []byte("%PDF-1.4 original"),
+			},
+		})
+		require.NoError(t, err)
+		uid, err := apiv1.ExtractAttachmentUIDFromName(created.Name)
+		require.NoError(t, err)
+		beforeUpdate, err := ts.Store.GetAttachment(ctx, &store.FindAttachment{UID: &uid})
+		require.NoError(t, err)
+		require.Equal(t, storepb.AttachmentStorageType_LOCAL, beforeUpdate.StorageType)
+		localPath := beforeUpdate.Reference
+		require.NotEmpty(t, localPath)
+		if !filepath.IsAbs(localPath) {
+			localPath = filepath.Join(ts.Profile.Data, localPath)
+		}
+		require.FileExists(t, localPath)
+
+		newContent := []byte("%PDF-1.4 flattened-with-annotations")
+		_, err = ts.Service.UpdateAttachment(userCtx, &v1pb.UpdateAttachmentRequest{
+			Attachment: &v1pb.Attachment{Name: created.Name, Content: newContent},
+			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"content"}},
+		})
+		require.NoError(t, err)
+
+		afterUpdate, err := ts.Store.GetAttachment(ctx, &store.FindAttachment{UID: &uid})
+		require.NoError(t, err)
+		require.Equal(t, beforeUpdate.Reference, afterUpdate.Reference, "the attachment must stay at the same location")
+		require.Equal(t, int64(len(newContent)), afterUpdate.Size)
+
+		onDisk, err := os.ReadFile(localPath)
+		require.NoError(t, err)
+		require.Equal(t, newContent, onDisk)
+
+		blob, err := ts.Service.GetAttachmentBlob(ctx, afterUpdate)
+		require.NoError(t, err)
+		require.Equal(t, newContent, blob)
+	})
+
+	t.Run("EmptyContentRejected", func(t *testing.T) {
+		ts := NewTestService(t)
+		defer ts.Cleanup()
+		user, err := ts.CreateRegularUser(ctx, "content-replace-empty-user")
+		require.NoError(t, err)
+		userCtx := ts.CreateUserContext(ctx, user.ID)
+
+		created, err := ts.Service.CreateAttachment(userCtx, &v1pb.CreateAttachmentRequest{
+			Attachment: &v1pb.Attachment{Filename: "empty.pdf", Type: "application/pdf", Content: []byte("original")},
+		})
+		require.NoError(t, err)
+
+		_, err = ts.Service.UpdateAttachment(userCtx, &v1pb.UpdateAttachmentRequest{
+			Attachment: &v1pb.Attachment{Name: created.Name},
+			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"content"}},
+		})
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+}
+
 func TestCreateAttachmentCleansSavedBlobWhenStoreCreateFails(t *testing.T) {
 	ts := NewTestService(t)
 	defer ts.Cleanup()

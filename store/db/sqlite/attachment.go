@@ -261,6 +261,12 @@ func applySQLiteAttachmentUpdate(ctx context.Context, executor dbExecutor, updat
 		}
 		set, args = append(set, "`payload` = ?"), append(args, string(bytes))
 	}
+	if v := update.Blob; v != nil {
+		set, args = append(set, "`blob` = ?"), append(args, v)
+	}
+	if v := update.Size; v != nil {
+		set, args = append(set, "`size` = ?"), append(args, *v)
+	}
 
 	args = append(args, update.ID)
 	stmt := "UPDATE `attachment` SET " + strings.Join(set, ", ") + " WHERE `id` = ?"

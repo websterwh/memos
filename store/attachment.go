@@ -70,6 +70,14 @@ type UpdateAttachment struct {
 	Filename  *string
 	MemoID    *int32
 	Payload   *storepb.AttachmentPayload
+	// Blob replaces the stored content for DATABASE-backed attachments only.
+	// LOCAL and S3 storage are rewritten in place by the caller (see
+	// server/api/v1 replaceAttachmentContent) before this reaches the
+	// driver, so Blob stays nil for those storage types; Size is set
+	// alongside it for every storage type so the row's byte count stays
+	// accurate.
+	Blob []byte
+	Size *int64
 	// Policy is present for transport-facing updates. Drivers discover the
 	// current attachment binding and authorize any linked memo in the same
 	// transaction as the update.

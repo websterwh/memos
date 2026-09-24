@@ -396,11 +396,38 @@ func (s *APIV1Service) UpdateAttachment(ctx context.Context, request *v1pb.Updat
 		Policy:    memoWritePolicy(user.ID, false),
 	}
 	for _, field := range request.UpdateMask.Paths {
-		if field == "filename" {
+		switch field {
+		case "filename":
 			if !validateFilename(request.Attachment.Filename) {
 				return nil, status.Errorf(codes.InvalidArgument, "filename contains invalid characters or format")
 			}
 			update.Filename = &request.Attachment.Filename
+		case "content":
+			// Replaces the attachment's stored bytes in place (e.g. saving a
+			// flattened, annotated version of a PDF back over the original)
+			// while keeping its id, filename and URL unchanged. This does not
+			// re-run the create-time processing pipeline (EXIF stripping,
+			// motion photo detection); it is meant for already-finished
+			// content, not raw uploads.
+			if len(request.Attachment.Content) == 0 {
+				return nil, status.Errorf(codes.InvalidArgument, "content is required")
+			}
+			if err := s.throttleAndCharge(ratelimit.ScopeUploadUser, userKey(user.ID), 1); err != nil {
+				return nil, err
+			}
+			instanceStorageSetting, err := s.Store.GetInstanceStorageSetting(ctx)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "failed to get instance storage setting: %v", err)
+			}
+			if err := checkUploadSize(instanceStorageSetting, int64(len(request.Attachment.Content))); err != nil {
+				return nil, err
+			}
+			blob, size, err := replaceAttachmentContent(ctx, s.Profile, s.Store, attachment, request.Attachment.Content)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "failed to replace attachment content: %v", err)
+			}
+			update.Blob = blob
+			update.Size = &size
 		}
 	}
 

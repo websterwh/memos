@@ -24,6 +24,10 @@
   var PDFJS_VERSION = "4.7.76";
   var PDFJS_BASE = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/" + PDFJS_VERSION + "/";
 
+  var PDFLIB_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
+
+  var ACCESS_TOKEN_KEY = "memos_access_token";
+
   var DB_NAME = "memos-pdf-annotations";
   var DB_VERSION = 1;
   var STORE_NAME = "documents";
@@ -60,6 +64,7 @@
     eraserPrecision: "ink_eraser",
     eraserStroke: "backspace",
     palette: "palette",
+    saveToMemos: "cloud_upload",
   };
 
   function ensureIconFont() {
@@ -141,6 +146,25 @@
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+
+  function hexToUnitRGB(hex) {
+    var match = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+    if (!match) return { r: 0, g: 0, b: 0 };
+    return {
+      r: parseInt(match[1], 16) / 255,
+      g: parseInt(match[2], 16) / 255,
+      b: parseInt(match[3], 16) / 255,
+    };
+  }
+
+  function uint8ToBase64(bytes) {
+    var binary = "";
+    var chunkSize = 0x8000;
+    for (var i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
   }
 
   // ---------------------------------------------------------------------
@@ -388,6 +412,33 @@
       });
     }
     return pdfjsLibPromise;
+  }
+
+  // pdf-lib (for flattening annotations into a saved PDF) ships a classic
+  // UMD build, so a plain <script src> tag is enough — no dynamic import
+  // needed here, unlike pdf.js.
+  var pdfLibPromise = null;
+
+  function loadPdfLib() {
+    if (!pdfLibPromise) {
+      pdfLibPromise = new Promise(function (resolve, reject) {
+        if (window.PDFLib) {
+          resolve(window.PDFLib);
+          return;
+        }
+        var script = el("script", {
+          src: PDFLIB_URL,
+          onload: function () {
+            resolve(window.PDFLib);
+          },
+          onerror: function () {
+            reject(new Error("Failed to load pdf-lib"));
+          },
+        });
+        document.head.appendChild(script);
+      });
+    }
+    return pdfLibPromise;
   }
 
   // ---------------------------------------------------------------------
@@ -1170,6 +1221,113 @@
     document.body.removeChild(a);
   };
 
+  // Bakes every stored stroke into a copy of the original PDF as real vector
+  // graphics (via pdf-lib's drawSvgPath, reusing the same 'd' string the SVG
+  // annotation layer already draws) and returns the resulting bytes. Only
+  // ink/highlight annotations are flattened today — see README.
+  PDFAnnotationViewer.prototype._flattenAnnotatedPdf = function () {
+    var self = this;
+    return Promise.all([
+      loadPdfLib(),
+      fetch(this.url, { credentials: "include" }).then(function (resp) {
+        if (!resp.ok) throw new Error("failed to fetch the original PDF (" + resp.status + ")");
+        return resp.arrayBuffer();
+      }),
+    ]).then(function (results) {
+      var PDFLib = results[0];
+      var originalBytes = results[1];
+      return PDFLib.PDFDocument.load(originalBytes).then(function (pdfDoc) {
+        var pages = pdfDoc.getPages();
+        self.manager.annotations.forEach(function (annotation) {
+          if (annotation.type !== "ink" && annotation.type !== "highlight") return;
+          var page = pages[annotation.page - 1];
+          if (!page) return;
+          var rgb = hexToUnitRGB(annotation.style.color);
+          page.drawSvgPath(pointsToPath(annotation.data.points), {
+            x: 0,
+            y: page.getHeight(),
+            scale: 1,
+            borderColor: PDFLib.rgb(rgb.r, rgb.g, rgb.b),
+            borderWidth: annotation.style.width,
+            borderOpacity: annotation.style.opacity,
+            borderLineCap: PDFLib.LineCapStyle.Round,
+          });
+        });
+        return pdfDoc.save();
+      });
+    });
+  };
+
+  // Replaces the attachment's stored content in place (same id, same
+  // filename, same download URL) via the Memos Connect API's JSON codec —
+  // no generated client is available inside a plain injected script, so
+  // this is a hand-built unary Connect request. See README "Save to Memos".
+  PDFAnnotationViewer.prototype._uploadReplacementContent = function (bytes) {
+    var token = null;
+    try {
+      token = localStorage.getItem(ACCESS_TOKEN_KEY);
+    } catch (e) {
+      token = null;
+    }
+    var headers = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = "Bearer " + token;
+
+    return fetch("/memos.api.v1.AttachmentService/UpdateAttachment", {
+      method: "POST",
+      credentials: "include",
+      headers: headers,
+      body: JSON.stringify({
+        attachment: { name: this.documentId, content: uint8ToBase64(bytes) },
+        updateMask: "content",
+      }),
+    }).then(function (resp) {
+      if (resp.ok) return resp.json();
+      return resp
+        .json()
+        .catch(function () {
+          return null;
+        })
+        .then(function (body) {
+          if (resp.status === 401) {
+            throw new Error("Session expired — reload Memos and try again");
+          }
+          throw new Error((body && body.message) || "request failed with status " + resp.status);
+        });
+    });
+  };
+
+  PDFAnnotationViewer.prototype.saveAnnotatedPdfToMemos = function () {
+    var self = this;
+    if (!this.manager.annotations.length) {
+      window.alert("There are no annotations to save yet.");
+      return Promise.resolve();
+    }
+    var confirmed = window.confirm(
+      'Save the annotated PDF over the original file in Memos?\n\nThis replaces "' +
+        this.filename +
+        '" everywhere it is downloaded from Memos. The un-annotated original cannot be recovered afterward ' +
+        "(your strokes stay editable in this viewer either way).",
+    );
+    if (!confirmed) return Promise.resolve();
+
+    this._setStatus("Flattening annotations into the PDF…");
+    return this._flattenAnnotatedPdf()
+      .then(function (bytes) {
+        self._setStatus("Saving to Memos…");
+        return self._uploadReplacementContent(bytes);
+      })
+      .then(function () {
+        self._setStatus("Saved annotated PDF to Memos.");
+        setTimeout(function () {
+          self._setStatus("");
+        }, 3000);
+      })
+      .catch(function (err) {
+        console.error("[memos-pdf-annotate] failed to save annotated PDF to Memos", err);
+        self._setStatus("Failed to save to Memos: " + (err && err.message ? err.message : String(err)));
+      });
+  };
+
   PDFAnnotationViewer.prototype.close = function () {
     var self = this;
     this.manager.flushNow().finally(function () {
@@ -1241,6 +1399,9 @@
       this.saveLabel,
       iconButton(ICONS.search, "Search", function () {
         self._toggleSearchBar();
+      }),
+      iconButton(ICONS.saveToMemos, "Save annotated PDF to Memos (replaces the original)", function () {
+        self.saveAnnotatedPdfToMemos();
       }),
       iconButton(ICONS.fullscreen, "Fullscreen", function () {
         self._toggleFullscreen();
