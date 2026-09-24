@@ -1,0 +1,283 @@
+/*
+ * Memos PDF Annotation + Handwriting (prototype)
+ * Paste into Settings -> General -> Additional Style.
+ * Pair with memos-pdf-annotate.js in Additional Script.
+ */
+
+.mpa-annotate-trigger {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.5rem;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  font-family: inherit;
+  border-radius: 999px;
+  border: 1px solid var(--mpa-trigger-border, rgba(120, 120, 130, 0.35));
+  background: var(--mpa-trigger-bg, rgba(120, 120, 130, 0.08));
+  color: var(--mpa-trigger-fg, inherit);
+  cursor: pointer;
+}
+
+.mpa-annotate-trigger:hover {
+  background: var(--mpa-trigger-bg-hover, rgba(120, 120, 130, 0.18));
+}
+
+.mpa-root {
+  --mpa-bg: #f4f4f5;
+  --mpa-surface: #ffffff;
+  --mpa-border: #e4e4e7;
+  --mpa-text: #18181b;
+  --mpa-text-muted: #71717a;
+  --mpa-accent: #2563eb;
+  --mpa-accent-contrast: #ffffff;
+  --mpa-danger: #dc2626;
+  --mpa-warn: #b45309;
+  --mpa-ok: #16a34a;
+  --mpa-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  background: var(--mpa-bg);
+  color: var(--mpa-text);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  font-size: 13px;
+}
+
+html[data-theme$="dark"] .mpa-root {
+  --mpa-bg: #18181b;
+  --mpa-surface: #27272a;
+  --mpa-border: #3f3f46;
+  --mpa-text: #f4f4f5;
+  --mpa-text-muted: #a1a1aa;
+  --mpa-accent: #3b82f6;
+  --mpa-accent-contrast: #0b1220;
+  --mpa-danger: #f87171;
+  --mpa-warn: #fbbf24;
+  --mpa-ok: #4ade80;
+  --mpa-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+html:not([data-theme]) .mpa-annotate-trigger {
+  --mpa-trigger-border: rgba(120, 120, 130, 0.35);
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) .mpa-root {
+    --mpa-bg: #18181b;
+    --mpa-surface: #27272a;
+    --mpa-border: #3f3f46;
+    --mpa-text: #f4f4f5;
+    --mpa-text-muted: #a1a1aa;
+    --mpa-accent: #3b82f6;
+    --mpa-accent-contrast: #0b1220;
+    --mpa-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+}
+
+.mpa-root * {
+  box-sizing: border-box;
+}
+
+.mpa-header,
+.mpa-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.75rem;
+  background: var(--mpa-surface);
+  border-bottom: 1px solid var(--mpa-border);
+}
+
+.mpa-header-group,
+.mpa-tools,
+.mpa-colors,
+.mpa-sizes {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.mpa-filename {
+  font-weight: 600;
+  margin-right: auto;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mpa-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--mpa-border);
+  border-radius: 0.4rem;
+  background: var(--mpa-surface);
+  color: var(--mpa-text);
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.mpa-btn:hover {
+  border-color: var(--mpa-accent);
+}
+
+.mpa-tool-btn.mpa-active {
+  background: var(--mpa-accent);
+  border-color: var(--mpa-accent);
+  color: var(--mpa-accent-contrast);
+}
+
+.mpa-close {
+  color: var(--mpa-danger);
+}
+
+.mpa-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--mpa-border);
+  margin: 0 0.25rem;
+}
+
+.mpa-page-input {
+  width: 3rem;
+  text-align: center;
+  height: 2rem;
+  border: 1px solid var(--mpa-border);
+  border-radius: 0.4rem;
+  background: var(--mpa-surface);
+  color: var(--mpa-text);
+  font: inherit;
+}
+
+.mpa-page-count,
+.mpa-zoom-label,
+.mpa-search-status {
+  color: var(--mpa-text-muted);
+  min-width: 2.5rem;
+  text-align: center;
+}
+
+.mpa-search-input {
+  height: 2rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--mpa-border);
+  border-radius: 0.4rem;
+  background: var(--mpa-surface);
+  color: var(--mpa-text);
+  font: inherit;
+  width: 12rem;
+}
+
+.mpa-save-indicator {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: var(--mpa-border);
+  color: var(--mpa-text-muted);
+}
+
+.mpa-save-saving {
+  color: var(--mpa-warn);
+}
+
+.mpa-save-saved {
+  color: var(--mpa-ok);
+}
+
+.mpa-save-dirty {
+  color: var(--mpa-text-muted);
+}
+
+.mpa-swatch {
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.mpa-swatch.mpa-active {
+  border-color: var(--mpa-accent);
+}
+
+.mpa-size-btn {
+  width: 1.6rem;
+  height: 1.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--mpa-border);
+  background: var(--mpa-surface);
+  cursor: pointer;
+  padding: 0;
+}
+
+.mpa-size-btn span {
+  display: block;
+  border-radius: 999px;
+  background: var(--mpa-text);
+}
+
+.mpa-size-btn.mpa-active {
+  border-color: var(--mpa-accent);
+}
+
+.mpa-status {
+  padding: 0.5rem 0.75rem;
+  color: var(--mpa-text-muted);
+  text-align: center;
+}
+
+.mpa-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 1.5rem 0;
+}
+
+.mpa-scroll.mpa-pan-cursor {
+  cursor: grab;
+}
+
+.mpa-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.mpa-page {
+  position: relative;
+  background: #ffffff;
+  box-shadow: var(--mpa-shadow);
+}
+
+.mpa-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.mpa-annot-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  touch-action: none;
+}
